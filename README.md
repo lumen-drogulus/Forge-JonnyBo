@@ -6,7 +6,7 @@ This copy is shared by two people, each on their own phone. The user guide is `g
 
 ## Where the data lives
 
-On each phone, inside Chrome. Nothing is sent anywhere, so two people using this copy never see or touch each other's records. Use **Settings → Back up data** to send a copy to Drive, email or a text. The app reminds you on the Home screen when a backup is overdue.
+On each phone, inside Chrome. Nothing is sent anywhere, so two people using this copy never see or touch each other's records. Use **Settings → Back up data** to send a copy to Drive, email or a text, and **Restore from backup** to load one. The app reminds you on the Home screen when a backup is overdue.
 
 ## Files
 
@@ -15,10 +15,11 @@ On each phone, inside Chrome. Nothing is sent anywhere, so two people using this
 | `index.html` | The app's page |
 | `guide.html` | The user guide for this copy |
 | `js/config.js` | Whose copy this is. **The only app file that differs from the main FORGE.** |
-| `js/data.js` | The program: workouts, exercises, tips, video links |
+| `js/data.js` | The program: each exercise once (name, tip, video), then each workout's sets, reps and rest |
 | `js/app.js` | Everything the app does |
 | `js/figures.js`, `js/moves.js` | The animated exercise figures (generated files, don't hand-edit) |
-| `css/` | The look |
+| `css/` | The look and the icons |
+| `fonts/` | The app's fonts, stored here so it works with no signal |
 | `sw.js` | Lets the app work offline and pick up updates |
 | `manifest.json`, `*.png` | App name and icons |
 

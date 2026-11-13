@@ -79,7 +79,9 @@
     clearAll() {
       if (Sandbox.frozen) return;
       if (Sandbox.on) { Sandbox.data = {}; Sandbox.save(); return; }
-      localStorage.clear();
+      // Only FORGE's own keys: every copy on this account shares one web address,
+      // and localStorage.clear() would empty the whole address.
+      Object.keys(localStorage).filter(k => k.indexOf('forge_') === 0).forEach(k => localStorage.removeItem(k));
     },
     getLogs() { return this.get('logs') || {}; },
     saveLogs(logs) { this.set('logs', logs); },
@@ -90,8 +92,7 @@
         bodyWeight: 180,
         workoutSize: 'normal',
         weightUnit: 'lbs',
-        sheetsUrl: '',
-        cycleStartDate: new Date().toISOString().split('T')[0]
+        sizeShift: 33   // a phone with no saved settings never had the old sizes
       };
     },
     saveSettings(s) { this.set('settings', s); },
@@ -115,12 +116,6 @@
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   }
 
-  // ===== CALENDAR DATA MIGRATION =====
-  // Rebuilds completedDays from the workout logs on every boot.
-  // Why: old code stamped completed days with the WRONG cycle day (the +7 offset bug),
-  // so Push A / Push B days were saved as type "rest" and never rendered an X mark.
-  // Logs always carried the correct dayId, so they are the source of truth.
-  // Runs in milliseconds, is safe to repeat, and self-heals after a Sheets restore.
   // ===== CYCLE DERIVATION =====
   // Cycle position is no longer a stored counter. It is recomputed from what
   // you actually logged, so it self-heals after a cache clear, a Sheets
@@ -137,7 +132,8 @@
 
   // ===== WORKOUT SIZE =====
   // Every exercise carries tier 1, 2 or 3 and the sizes are cumulative:
-  // light = tier 1, normal = 1+2, extended = everything. One list per day,
+  // light = tier 1, normal = 1+2, extended = everything (v0.33: on the six cycle days
+  // tier 1 is the old 1+2, tier 2 the old 3, tier 3 the new moves). One list per day,
   // three views of it, so nothing is authored twice.
   const SIZE_TIERS = { light: 1, normal: 2, extended: 3 };
   const SIZE_ORDER = ['light', 'normal', 'extended'];
@@ -150,10 +146,7 @@
   }
 
   function minutesFor(workout, size) {
-    if (workout && workout.minutesBySize && workout.minutesBySize[size]) {
-      return workout.minutesBySize[size];
-    }
-    return workout ? workout.estimatedMinutes : 0;
+    return (workout && workout.minutesBySize && workout.minutesBySize[size]) || 0;
   }
 
   // The exercise list the ACTIVE session is running. Locked in at start, so
@@ -162,7 +155,225 @@
     const day = activeDay();
     const workout = FORGE_DATA.workouts[day.id];
     const size = (state.activeWorkoutLog && state.activeWorkoutLog.size) || state.workoutSize;
-    return exercisesFor(workout, size);
+    // v0.32: moves added mid-session ride at the end of the plan, in the
+    // order they were added, so every index still lines up with the log.
+    return exercisesFor(workout, size).concat(addedExercises());
+  }
+
+  // ===== ADDED EXERCISES AND CARDIO (v0.32) =====
+  // activeWorkoutLog.extras holds the ids added to this session from the
+  // workout list. An id the app no longer knows still gets a row, built from
+  // the log, so the list can never fall out of step with the logged sets.
+  function addedExercises() {
+    const log = state.activeWorkoutLog;
+    const ids = (log && log.extras) || [];
+    return ids.map(id => exDef(id) || {
+      id: id, name: ((log.exercises.find(e => e.id === id) || {}).name) || id,
+      sets: 1, reps: '-', rpe: '-', rest: 60, restLabel: '60 sec', weightMode: 'free', tip: '', video: ''
+    });
+  }
+
+  function isCardio(ex) { return !!ex && ex.trackMode === 'cardio'; }
+
+  // Every move the app knows, once each: cardio first, then grouped under
+  // the first workout that uses it.
+  function addCatalog() {
+    const seen = {};
+    const groups = [];
+    const cardio = FORGE_DATA.cardio || [];
+    if (cardio.length) groups.push({ label: 'Cardio', items: cardio });
+    cardio.forEach(e => { seen[e.id] = true; });
+    FORGE_DATA.cycleDays.concat(Object.values(FORGE_DATA.alternates || {})).forEach(d => {
+      const w = FORGE_DATA.workouts[d.id];
+      if (!w) return;
+      const items = (w.exercises || []).filter(e => {
+        if (seen[e.id]) return false;
+        seen[e.id] = true;
+        return true;
+      });
+      if (items.length) groups.push({ label: d.name, items: items });
+    });
+    return groups;
+  }
+
+  function openAddSheet() {
+    if (!state.activeWorkoutLog) return;
+    const inPlan = {};
+    activeExercises().forEach(e => { inPlan[e.id] = true; });
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const row = ex => {
+      const taken = inPlan[ex.id];
+      const sub = isCardio(ex) ? 'Time \u00b7 distance \u00b7 level' : `${ex.sets} \u00d7 ${shortReps(ex.reps)}`;
+      return `
+        <button class="pick-row add-row${taken ? ' taken' : ''}" data-name="${esc(ex.name.toLowerCase())}"
+                ${taken ? 'disabled' : `onclick="FORGE.addExercise('${ex.id}')"`}>
+          <span class="pick-body">
+            <span class="pick-name">${ex.name}</span>
+            <span class="pick-sub">${taken ? 'Already in today\u2019s list' : sub}</span>
+          </span>
+          <i class="ti ti-${taken ? 'check' : 'plus'}"></i>
+        </button>`;
+    };
+    document.getElementById('info-panel-content').innerHTML = `
+      <div class="info-panel-title">Add to today</div>
+      <input type="search" class="add-search" id="add-search" placeholder="Search moves" autocomplete="off"
+             enterkeyhint="search" oninput="FORGE.filterAdd(this.value)" aria-label="Search moves">
+      ${addCatalog().map(g => `
+        <div class="add-group">
+          <div class="sheet-section-label">${g.label}</div>
+          ${g.items.map(row).join('')}
+        </div>`).join('')}
+      <div class="sheet-note" id="add-empty" hidden>Nothing by that name.</div>
+    `;
+    showPanel('info-panel');
+  }
+
+  function filterAdd(q) {
+    const needle = String(q || '').trim().toLowerCase();
+    let any = false;
+    document.querySelectorAll('#info-panel-content .add-group').forEach(g => {
+      let shown = 0;
+      g.querySelectorAll('.add-row').forEach(r => {
+        const hit = !needle || r.dataset.name.indexOf(needle) !== -1;
+        r.hidden = !hit;
+        if (hit) shown++;
+      });
+      g.hidden = shown === 0;
+      if (shown) any = true;
+    });
+    const empty = document.getElementById('add-empty');
+    if (empty) empty.hidden = any;
+  }
+
+  function addExercise(id) {
+    const log = state.activeWorkoutLog;
+    const ex = exDef(id);
+    if (!log || !ex || activeExercises().some(e => e.id === id)) return;
+    if (!log.extras) log.extras = [];
+    log.extras.push(id);
+    log.exercises.push({ id: ex.id, name: ex.name, sets: [], completed: false, added: true });
+    persistWorkoutState();
+    dismissPanel();
+    state.workoutPhase = 'overview';
+    renderWorkoutView();
+  }
+
+  // Take back an added move, only while it has no sets. Later rows move up
+  // one, so the skipped list (which goes by position) moves with them.
+  function removeAdded(index) {
+    const log = state.activeWorkoutLog;
+    if (!log || !log.extras) return;
+    const k = index - (log.exercises.length - log.extras.length);
+    const entry = log.exercises[index];
+    if (k < 0 || !entry || entry.sets.length) return;
+    log.extras.splice(k, 1);
+    log.exercises.splice(index, 1);
+    state.skippedExercises = state.skippedExercises
+      .filter(i => i !== index).map(i => (i > index ? i - 1 : i));
+    state.currentExerciseIndex = 0;
+    state.currentSetIndex = 0;
+    persistWorkoutState();
+    renderWorkoutView();
+  }
+
+  // The second and third cardio boxes are named per machine in data.js.
+  function cardioNum(n) { return Math.round((Number(n) || 0) * 100) / 100; }
+  function cardioDisplay(ex, c) {
+    const parts = [];
+    if (c.min) parts.push(cardioNum(c.min) + ' min');
+    if (c.dist) parts.push(cardioNum(c.dist) + ' ' + ((ex.dist && ex.dist.unit) || 'mi'));
+    if (c.level) parts.push(ex.level && ex.level.unit === '%' ? cardioNum(c.level) + '%' : 'L' + cardioNum(c.level));
+    return parts.join(' \u00b7 ');
+  }
+
+  function renderCardio(el, ex, log, day, typeClass, plan) {
+    const editing = state.editingSetIndex !== null ? log.sets[state.editingSetIndex] : null;
+    const done = log.sets.length >= ex.sets && !editing;
+    const lastLog = lastExLog(ex.id, day.id);
+    const lastSet = lastLog ? lastLog.sets[lastLog.sets.length - 1] : null;
+    const pre = (editing && editing.cardio) || (lastSet && lastSet.cardio) || {};
+    const dist = ex.dist || { label: 'Distance', unit: 'mi' };
+    const level = ex.level || { label: 'Resistance', unit: 'level' };
+    const ticks = plan.map((p, i) => {
+      const d = state.activeWorkoutLog.exercises[i] && state.activeWorkoutLog.exercises[i].completed;
+      return `<span class="${d ? 'done' : i === state.currentExerciseIndex ? 'current' : ''}"></span>`;
+    }).join('');
+    const box = (id, label, unit, val, mode) => `
+            <div class="cardio-row">
+              <label class="load-label" for="${id}">${label}</label>
+              <input type="number" class="reps-input cardio-input" id="${id}" value="${val || ''}" inputmode="${mode}" enterkeyhint="done" placeholder="0" min="0" step="any">
+              <span class="cardio-unit">${unit}</span>
+            </div>`;
+
+    el.innerHTML = `
+      <div class="${typeClass}">
+        <div class="exercise-header">
+          <button class="back-btn" onclick="FORGE.backToOverview()" aria-label="Back to overview"><i class="ti ti-chevron-left"></i></button>
+          <div class="exercise-header-mid">
+            <div class="exercise-day-label">${day.name} \u00b7 ${day.label}</div>
+            <div class="exercise-position">Exercise ${state.currentExerciseIndex + 1} of ${plan.length}</div>
+          </div>
+          <button class="skip-btn" onclick="FORGE.skipExercise()">Skip <i class="ti ti-arrow-right"></i></button>
+        </div>
+        <div class="ex-progress">${ticks}</div>
+      </div>
+
+      <div class="${typeClass}">
+        <h1 class="exercise-name">${ex.name}</h1>
+        <div class="exercise-params">Cardio \u00b7 log what the machine shows</div>
+      </div>
+
+      ${ex.tip ? `<div class="cardio-tip">${ex.tip}</div>` : ''}
+
+      <div class="cardio-last">
+        <span class="stat-label">Last time</span>
+        <span class="cardio-last-v">${lastSet ? lastSet.display : '\u2014'}</span>
+      </div>
+
+      ${done ? `
+        <div class="set-indicators ${typeClass}">
+          ${log.sets.map((s, i) => `
+          <div class="set-indicator done" onclick="FORGE.editSet(${i})" style="cursor:pointer;">
+            <div class="si-label">Logged \u2713 \u00b7 tap to edit</div>
+            <div class="si-data">${s.display}</div>
+          </div>`).join('')}
+        </div>
+        <button class="save-set-btn ${typeClass}" onclick="FORGE.finishExercise()">
+          ${findNextExercise() !== -1 && findNextExercise() !== state.currentExerciseIndex ? 'Next exercise' : 'Back to the list'} <i class="ti ti-arrow-right"></i>
+        </button>
+      ` : `
+        <div class="load-block cardio-block ${typeClass}">
+          ${box('cardio-min', 'Time', 'min', pre.min, 'decimal')}
+          ${box('cardio-dist', dist.label, dist.unit, pre.dist, 'decimal')}
+          ${box('cardio-level', level.label, level.unit, pre.level, 'decimal')}
+        </div>
+        <button class="save-set-btn ${typeClass}" onclick="${editing ? 'FORGE.updateSet()' : 'FORGE.saveSet()'}">
+          ${editing ? 'Update' : 'Save'} ${ex.name.toLowerCase()}
+        </button>
+        ${editing ? `<button class="skip-btn cancel-edit-btn" onclick="FORGE.cancelEdit()">Cancel edit</button>` : ''}
+      `}
+    `;
+  }
+
+  // One cardio entry: time, distance, level. No reps and no load, so it stays
+  // out of records and out of the rep totals. idx null = new, else the edit.
+  function saveCardio(ex, log, idx) {
+    const read = id => {
+      const el = document.getElementById(id);
+      const v = el ? parseFloat(el.value) : NaN;
+      return isFinite(v) && v > 0 ? cardioNum(v) : 0;
+    };
+    const c = { min: read('cardio-min'), dist: read('cardio-dist'), level: read('cardio-level') };
+    if (!c.min && !c.dist) {
+      const first = document.getElementById('cardio-min');
+      if (first) first.focus();
+      return;
+    }
+    const set = { weight: 0, entered: null, reps: 0, repsDisplay: '', display: cardioDisplay(ex, c), timestamp: Date.now(), cardio: c };
+    if (idx === null) { log.sets.push(set); state.currentSetIndex++; }
+    else { log.sets[idx] = set; state.editingSetIndex = null; }
+    renderExercise(document.getElementById('main-content'));
+    persistWorkoutState();
   }
 
   function setWorkoutSize(size) {
@@ -345,14 +556,41 @@
     Store.set('completedDays', rebuilt);
   }
 
+  // ===== SIZE SHIFT (v0.33) =====
+  // On the six cycle days the old Normal became Light and the old Extended became
+  // Normal, with a new, bigger Extended on top. Run once per phone: move the saved
+  // default down one step so the daily workout stays the same list of moves, and do
+  // the same for a workout that was in progress when the update landed (its log is
+  // positional, and the old Extended list is exactly the new Normal list).
+  // Alternates kept their sizes, so a workout in progress on one is left alone.
+  function migrateSizeShift() {
+    var s = Store.getSettings();
+    if (s.sizeShift) return;
+    var down = { extended: 'normal', normal: 'light' };
+    // Only a phone with saved settings has a size to move. A fresh install has
+    // none (getSettings() hands back defaults) and keeps the default, Normal.
+    var had = !!Store.get('settings');
+    var cur = s.workoutSize || 'normal';   // saved settings with no size were running on Normal
+    if (had && down[cur]) s.workoutSize = down[cur];
+    s.sizeShift = 33;
+    Store.saveSettings(s);
+    var saved = Store.getActiveWorkout();
+    var log = saved && saved.activeWorkoutLog;
+    if (log && down[log.size] && FORGE_DATA.cycleDays.some(function(d) { return d.id === log.dayId; })) {
+      log.size = down[log.size];
+      Store.saveActiveWorkout(saved);
+    }
+  }
+
   // ===== INIT =====
   function init() {
     playSplash();   // start the logo strike right away
+    migrateSizeShift();
     var settings = Store.getSettings();
     state.bodyWeight = settings.bodyWeight || 180;
     state.workoutSize = settings.workoutSize || 'normal';
     state.weightUnit = settings.weightUnit || 'lbs';
-    state.sheetsUrl = settings.sheetsUrl || FORGE_DATA.sheetsWebhookUrl || '';
+    state.sheetsUrl = FORGE_DATA.sheetsWebhookUrl || '';   // config.js only (v0.34)
     if (Sandbox.on) state.sheetsUrl = '';   // sandbox never talks to Sheets
     setupSandboxChrome();
     requestPersist();
@@ -371,8 +609,11 @@
       restoreFromSheets().then(function(restored) {
         if (restored) {
           var s = Store.getSettings();
+          migrateSizeShift();
+          s = Store.getSettings();
           state.bodyWeight = s.bodyWeight || 180;
           state.weightUnit = s.weightUnit || 'lbs';
+          state.workoutSize = s.workoutSize || 'normal';
         }
         migrateCompletedDays(); // restored backup may contain old poisoned entries
         applyBwModes();
@@ -451,7 +692,9 @@
   }
 
   function persistWorkoutState() {
-    if (!state.workoutActive) {
+    // A finished workout (the FORGED screen) is already saved to the log, so it
+    // is no longer in progress even before Done is tapped.
+    if (!state.workoutActive || state.workoutPhase === 'complete') {
       Store.saveActiveWorkout(null);
       return;
     }
@@ -485,6 +728,28 @@ Store.saveActiveWorkout({
   // jumping a version. Add a new entry at the top for every release that has
   // notes; a release without notes adds nothing and shows nothing.
   const RELEASES = [
+    { id: 'v0.34', items: [
+      ['Records fix themselves', 'Edit a set or delete a workout and that move\u2019s record is worked out again from what you logged. A typo no longer leaves a record you can\u2019t beat.'],
+      ['No more e1RM', 'Records, history and the PR screen show the set you actually did. The estimated one-rep max is gone.'],
+      ['Works with no signal', 'Fonts and icons are saved with the app now, so it looks the same in a dead zone.'],
+    ] },
+    { id: 'v0.33', items: [
+      ['Sizes moved up', 'On the six main days, Light is now the old Normal and Normal is the old Extended. Your saved size was moved down one step, so your usual workout is the same moves as before. Earlier days on the calendar keep the mark they were logged with.'],
+      ['New Extended', 'Extended adds two more moves to each main day (three on Legs B): extra arm and forearm work on the push and pull days, hamstrings, inner thigh and glutes on the leg days.'],
+      ['Eight new moves', 'Incline Dumbbell Curl, EZ-Bar Skull Crusher, Behind-the-Body Cable Curl, EZ-Bar Reverse Curl, Wrist Curl, Seated Leg Curl, Hip Adduction Machine and Hip Thrust Machine, each with an animated demo. The skull crusher and the reverse curl have a second camera angle. All eight are also in Add exercise.'],
+    ] },
+    { id: 'v0.32', items: [
+      ['Add an exercise', 'On the workout list, tap Add exercise to put any move in the app on today\u2019s session. It counts toward that move\u2019s history and records like any other set.'],
+      ['Cardio', 'Treadmill, Stair Stepper, Bike and Elliptical are at the top of that list. Log the time, the distance and the level.'],
+      ['Vibration switch', 'Settings, under the rest alert volume: turn the rest-end buzz off or back on.'],
+    ] },
+    { id: 'v0.31', items: [
+      ['Neck work with weight', 'The hand-press isometrics are off the six main days. Neck Flexion is on both push days, Neck Extension on both pull days and a new Side Neck Raise on both leg days. Start at bodyweight, then a 5 lb plate in a towel.'],
+      ['New demos', 'Reverse Crunch, Decline Plate Crunch and Side Neck Raise each have an animated demo.'],
+    ] },
+    { id: 'v0.30.2', items: [
+      ['Cable crunch replaced', 'Three moves take its place: Reverse Crunch on Push A, Pallof Press on Legs A and Decline Plate Crunch on Back & Core.'],
+    ] },
     { id: 'v0.30.1', items: [
       ['Chest-supported row', 'Now counted as a dumbbell move: enter one dumbbell and the total for both hands shows under it.'],
     ] },
@@ -843,6 +1108,14 @@ Store.saveActiveWorkout({
   function shortRest(label) {
     return String(label || '').replace(/\s*sec(onds)?/i, 's');
   }
+  // "10-12" reads "10-12 reps", "12-15 ea" reads "12-15 reps each",
+  // anything else as written ("to failure", "40 yd each", "30s").
+  function repsText(r) {
+    const s = String(r);
+    const m = /^(\d+(?:-\d+)?)(\s*(?:ea|each))?$/.exec(s);
+    if (m) return m[1] + ' reps' + (m[2] ? ' each' : '');
+    return s.replace(/\bea\b/, 'each');
+  }
 
   // Today's movements as a spec table. During a session, finished rows grey out.
   function renderMoveTable(exs, typeClass) {
@@ -854,8 +1127,8 @@ Store.saveActiveWorkout({
         <div class="mt-row${done ? ' done' : ''}">
           <span class="mt-n">${String(i + 1).padStart(2, '0')}</span>
           <span class="mt-name"><span class="mt-name-text">${ex.name}</span>${tag}</span>
-          <span class="mt-sr">${ex.sets}×${shortReps(ex.reps)}</span>
-          <span class="mt-rest">${shortRest(ex.restLabel)}</span>
+          <span class="mt-sr">${isCardio(ex) ? 'Cardio' : ex.sets + '×' + shortReps(ex.reps)}</span>
+          <span class="mt-rest">${isCardio(ex) ? '\u2014' : shortRest(ex.restLabel)}</span>
         </div>`;
     }).join('');
     return `
@@ -1001,16 +1274,6 @@ Store.saveActiveWorkout({
     renderWorkoutView();
   }
 
-  function renderCycleBar() {
-    return FORGE_DATA.cycleDays.map((d, i) => {
-      let cls = d.type;
-      if (i < state.cycleIndex) cls += ' past';
-      else if (i === state.cycleIndex) cls += ' current';
-      else cls += ' future';
-      return `<div class="cycle-dot ${cls}"></div>`;
-    }).join('');
-  }
-
   function renderCalendar() {
     const today = new Date();
     const year = state.calendarYear;
@@ -1108,9 +1371,10 @@ Store.saveActiveWorkout({
 
       <div class="sheet-section-label">Size</div>
       <div class="key-grid">
-        <div class="key-row"><span class="cal-code pwr">\u2212</span><span>Light \u00b7 ~30 min</span></div>
-        <div class="key-row"><span class="cal-code pwr">\u2731</span><span>Normal \u00b7 ~60 min</span></div>
-        <div class="key-row"><span class="cal-code pwr">+</span><span>Extended \u00b7 ~90 min</span></div>
+        <div class="key-row"><span class="cal-code pwr">\u2212</span><span>Light \u00b7 ~60 min</span></div>
+        <div class="key-row"><span class="cal-code pwr">\u2731</span><span>Normal \u00b7 ~85 min</span></div>
+        <div class="key-row"><span class="cal-code pwr">+</span><span>Extended \u00b7 ~105 min</span></div>
+        <div class="key-row"><span class="cal-code cal">\u2212</span><span>Calisthenics, Back &amp; Core \u00b7 ~30 / 55 / 80</span></div>
       </div>
 
       <div class="sheet-section-label">Colour</div>
@@ -1183,10 +1447,6 @@ Store.saveActiveWorkout({
     showPanel('info-panel');
   }
 
-  function closeDaySheet() {
-    dismissPanel();
-  }
-
   // Writes the entry. Kept separate from the sheet UI so "Log rest day" on
   // the home screen doesn't have to open and immediately close a panel.
   function addDayEntry(dateStr, dayId) {
@@ -1242,9 +1502,12 @@ Store.saveActiveWorkout({
 
     // A logged workout also owns rows in forge_logs. Drop those too, or the
     // next launch rebuilds the entry straight back onto the calendar.
+    let touched = [];
     if (!target.manual && target.dayId && target.dayId !== 'rest') {
       const logs = Store.getLogs();
       if (logs[target.dayId]) {
+        logs[target.dayId].filter(l => l.completedAt === target.completedAt)
+          .forEach(l => (l.exercises || []).forEach(e => touched.push(e.id)));
         logs[target.dayId] = logs[target.dayId].filter(l => l.completedAt !== target.completedAt);
         if (!logs[target.dayId].length) delete logs[target.dayId];
         Store.saveLogs(logs);
@@ -1252,6 +1515,7 @@ Store.saveActiveWorkout({
     }
 
     Store.set('completedDays', completed.filter(c => entryUid(c) !== uid));
+    rebuildRecords(touched);   // records set in the deleted workout go with it
     refreshCycle();
     state._calendarNavActive = true;
     openDaySheet(state._sheetDate);
@@ -1259,7 +1523,10 @@ Store.saveActiveWorkout({
   }
 
   function logRestToday() {
-    addDayEntry(todayLocal(), 'rest');
+    const today = todayLocal();
+    // One rest mark per day: a second tap used to add a second one.
+    if (Store.getCompletedDays().some(c => c.date === today && c.type === 'rest')) return;
+    addDayEntry(today, 'rest');
     renderHome(document.getElementById('main-content'));
   }
 
@@ -1369,9 +1636,13 @@ Store.saveActiveWorkout({
       </div>
     `;
 
-    activeExercises().forEach((ex, i) => {
+    const plan = activeExercises();
+    const firstAdded = plan.length - ((state.activeWorkoutLog.extras || []).length);
+    plan.forEach((ex, i) => {
       const log = state.activeWorkoutLog.exercises[i];
       const done = log.completed;
+      const added = i >= firstAdded;
+      const removable = added && log.sets.length === 0;
       const skipped = state.skippedExercises.includes(i);
       let numCls = done ? 'wo-num done' : 'wo-num';
       let itemCls = done ? 'wo-item completed' : skipped ? 'wo-item skipped' : 'wo-item';
@@ -1380,9 +1651,10 @@ Store.saveActiveWorkout({
         <div class="${itemCls}" onclick="FORGE.goToExercise(${i})">
           <div class="${numCls}">${done ? '<i class="ti ti-check" style="font-size:14px"></i>' : String(i + 1).padStart(2, '0')}</div>
           <div class="wo-item-info">
-            <div class="wo-item-name">${ex.name}${ex.isFinisher ? `<span class="finisher-tag">Finisher</span>` : ex.isPrimer ? `<span class="primer-tag">Primer</span>` : ''}</div>
-            <div class="wo-item-detail">${ex.sets} × ${shortReps(ex.reps)} · rest ${shortRest(ex.restLabel)}</div>
+            <div class="wo-item-name">${ex.name}${added ? `<span class="primer-tag added-tag">Added</span>` : ex.isFinisher ? `<span class="finisher-tag">Finisher</span>` : ex.isPrimer ? `<span class="primer-tag">Primer</span>` : ''}</div>
+            <div class="wo-item-detail">${isCardio(ex) ? (log.sets.length ? log.sets[log.sets.length - 1].display : 'Time · distance · level') : `${ex.sets} × ${shortReps(ex.reps)} · rest ${shortRest(ex.restLabel)}`}</div>
           </div>
+          ${removable ? `<button class="wo-remove" onclick="event.stopPropagation();FORGE.removeAdded(${i})" aria-label="Remove ${ex.name}"><i class="ti ti-x"></i></button>` : ''}
           <div class="wo-item-status"><i class="ti ti-chevron-right"></i></div>
         </div>
       `;
@@ -1399,6 +1671,7 @@ Store.saveActiveWorkout({
         <button class="skip-btn" onclick="FORGE.endWorkout()">End</button>
       </div>
       <div class="workout-overview-list ${typeClass}">${items}</div>
+      <button class="add-ex-btn" onclick="FORGE.openAddSheet()"><i class="ti ti-plus"></i> Add exercise</button>
       ${allDone ? `<button class="save-set-btn ${typeClass}" onclick="FORGE.completeWorkout()">Complete workout <i class="ti ti-check"></i></button>` : ''}
     `;
   }
@@ -1548,6 +1821,7 @@ Store.saveActiveWorkout({
     const log = state.activeWorkoutLog.exercises[state.currentExerciseIndex];
     const typeClass = toneClass(day);
     const totalExercises = plan.length;
+    if (isCardio(ex)) { renderCardio(el, ex, log, day, typeClass, plan); return; }
 
     // Get previous data for this exercise
     const prevData = getPreviousExerciseData(ex.id, day.id);
@@ -1642,7 +1916,7 @@ Store.saveActiveWorkout({
 
       <div class="${typeClass}">
         <h1 class="exercise-name">${ex.name}</h1>
-        <div class="exercise-params">${ex.sets} sets · ${ex.reps} reps${ex.rpe !== '-' ? ` · RPE ${ex.rpe}` : ''} · Rest ${ex.restLabel}</div>
+        <div class="exercise-params">${ex.sets} sets · ${repsText(ex.reps)}${ex.rpe !== '-' ? ` · RPE ${ex.rpe}` : ''} · Rest ${ex.restLabel}</div>
       </div>
 
       <div class="exercise-actions">
@@ -1755,7 +2029,7 @@ Store.saveActiveWorkout({
           <div class="up-next-preview">
             <span class="up-next-label">Up next ›</span>
             <span class="up-next-name">${nextEx.name}${nextEx.isFinisher ? ' 🔥' : ''}</span>
-            <span class="up-next-detail">${nextEx.sets}×${shortReps(nextEx.reps)} · ${shortRest(nextEx.restLabel)}</span>
+            <span class="up-next-detail">${isCardio(nextEx) ? 'Cardio' : `${nextEx.sets}×${shortReps(nextEx.reps)} · ${shortRest(nextEx.restLabel)}`}</span>
           </div>
         ` : ''}
 
@@ -1771,9 +2045,9 @@ Store.saveActiveWorkout({
   // ===== SET LOGGING =====
   function saveSet() {
     const day = activeDay();
-    const workout = FORGE_DATA.workouts[day.id];
     const ex = activeExercises()[state.currentExerciseIndex];
     const log = state.activeWorkoutLog.exercises[state.currentExerciseIndex];
+    if (isCardio(ex)) { saveCardio(ex, log, null); return; }
     const isBW = ex.weightMode === 'bw';
 
    let weight, reps, display, entered = null;
@@ -1851,10 +2125,10 @@ Store.saveActiveWorkout({
 
   function updateSet() {
     const day = activeDay();
-    const workout = FORGE_DATA.workouts[day.id];
     const ex = activeExercises()[state.currentExerciseIndex];
     const log = state.activeWorkoutLog.exercises[state.currentExerciseIndex];
     const idx = state.editingSetIndex;
+    if (isCardio(ex)) { saveCardio(ex, log, idx); return; }
     const isBW = ex.weightMode === 'bw';
 
     let weight, reps, display, entered = null;
@@ -1897,16 +2171,13 @@ Store.saveActiveWorkout({
       ...(isPaired(ex) ? { perHand: true } : {})
     };
 
-    if (ex.trackMode === 'time') {
-      const seconds = parseInt(reps) || 0;
-      if (seconds > 0) {
-        const isPR = checkAndUpdateTimePR(ex.id, ex.name, seconds);
-        if (isPR) showPRCelebration(ex, isPR);
-      }
-    } else if (repsNum > 0 && (weight > 0 || ex.weightMode === 'bw')) {
-      const isPR = checkAndUpdatePR(ex.id, ex.name, weight, repsNum, entered, ex);
-      if (isPR) showPRCelebration(ex, isPR);
-    }
+    // The record is worked out again from every logged set (v0.34), so fixing
+    // a typo takes back the record it set. An edit that beats the old record
+    // still gets the celebration.
+    const before = Store.getPRs()[ex.id];
+    rebuildRecords([ex.id]);
+    const after = Store.getPRs()[ex.id];
+    if (before && after && recBetter(after, before)) showPRCelebration(ex, before);
 
     state.editingSetIndex = null;
     renderExercise(document.getElementById('main-content'));
@@ -1928,7 +2199,7 @@ Store.saveActiveWorkout({
     const nextIndex = findNextExercise();
     if (nextIndex !== -1) {
       state.currentExerciseIndex = nextIndex;
-      state.currentSetIndex = 0;
+      state.currentSetIndex = state.activeWorkoutLog.exercises[nextIndex].sets.length;
       renderExercise(document.getElementById('main-content'));
     } else {
       state.workoutPhase = 'overview';
@@ -1958,7 +2229,7 @@ Store.saveActiveWorkout({
     const nextIndex = findNextExercise();
     if (nextIndex !== -1 && nextIndex !== state.currentExerciseIndex) {
       state.currentExerciseIndex = nextIndex;
-      state.currentSetIndex = 0;
+      state.currentSetIndex = state.activeWorkoutLog.exercises[nextIndex].sets.length;
       state.workoutPhase = 'exercise';
       renderWorkoutView();
     } else {
@@ -1985,7 +2256,7 @@ Store.saveActiveWorkout({
   function warmupDone() {
     state.workoutPhase = 'exercise';
     state.currentExerciseIndex = 0;
-    state.currentSetIndex = 0;
+    state.currentSetIndex = state.activeWorkoutLog.exercises[0].sets.length;
     renderWorkoutView();
     persistWorkoutState();
   }
@@ -2002,6 +2273,7 @@ Store.saveActiveWorkout({
   function completeWorkout() {
     state.workoutPhase = 'complete';
     saveWorkoutToStorage();
+    persistWorkoutState();
     refreshCycle();
     renderWorkoutView();
   }
@@ -2280,6 +2552,74 @@ Store.saveActiveWorkout({
     }
   }
 
+  // ===== RECORDS WORKED OUT AGAIN FROM THE LOG (v0.34) =====
+  // Records used to only go up, so a typo (315 for 135) stayed the record even
+  // after the set was fixed. When a set is edited or a workout is deleted, the
+  // record for each move it touched is worked out again from every logged set,
+  // the session in progress included. Moves that weren't touched are left alone.
+  function recBetter(a, b) {
+    if (!a) return false;
+    if (!b) return true;
+    if (a.mode === 'time') return (a.bestTime || 0) > (b.bestTime || 0);
+    if (a.mode === 'reps') return (a.bestReps || 0) > (b.bestReps || 0);
+    const da = addedLoad(a), db = addedLoad(b);
+    return da > db || (da === db && (a.reps || 0) > (b.reps || 0));
+  }
+
+  // One logged set as a record, by the same rules checkAndUpdatePR uses when
+  // the set is saved. null = this set can't be a record for this move.
+  function recordOfSet(set, ex, mode) {
+    if (!set || set.cardio) return null;
+    const x = readSet(set);
+    const reps = parseInt(set.reps) || 0;
+    if (reps <= 0) return null;
+    const date = set.timestamp ? new Date(set.timestamp).toISOString() : new Date().toISOString();
+    if (mode === 'time') return x.form === 'time' ? { name: ex.name, mode: 'time', bestTime: x.secs, isTime: true, date: date, prVersion: 2 } : null;
+    if (mode === 'reps') return x.form === 'bw' ? { name: ex.name, mode: 'reps', bestReps: reps, date: date, prVersion: 3 } : null;
+    const weight = Number(set.weight) || 0;
+    if (weight <= 0) return null;   // no load, no record (a 0 lb back extension)
+    const onBwScale = ex.weightMode === 'bw-plus' || ex.weightMode === 'bw-minus';
+    let weightMode = 'free', entered;
+    if (onBwScale) {
+      if (x.form === 'signed') { weightMode = x.add < 0 ? 'bw-minus' : 'bw-plus'; entered = Math.abs(x.add); }
+      else if (x.form === 'bw') { weightMode = 'bw-plus'; entered = 0; }   // unassisted counts as BW+0
+      else return null;
+    } else {
+      if (x.form !== 'free' && x.form !== 'pair') return null;
+      entered = x.load;
+    }
+    const rec = { name: ex.name, mode: 'weight', weight: weight, entered: entered, weightMode: weightMode,
+                  reps: reps, e1rm: e1rmOf(weight, reps), date: date, prVersion: 3 };
+    if (x.form === 'pair') rec.perHand = true;
+    return rec;
+  }
+
+  function rebuildRecords(ids) {
+    const logs = Store.getLogs();
+    const sessions = [];
+    Object.keys(logs).forEach(d => [].concat(logs[d] || []).forEach(e => sessions.push(e)));
+    if (state.activeWorkoutLog) sessions.push(state.activeWorkoutLog);
+    const prs = Store.getPRs();
+    let changed = false;
+    Array.from(new Set(ids)).forEach(id => {
+      const ex = exDef(id);
+      if (!ex || isCardio(ex)) return;
+      const mode = prModeOf(ex);
+      let best = null;
+      sessions.forEach(entry => (entry.exercises || []).forEach(exLog => {
+        if (!exLog || exLog.id !== id || !Array.isArray(exLog.sets)) return;
+        exLog.sets.forEach(set => {
+          const rec = recordOfSet(set, ex, mode);
+          if (rec && recBetter(rec, best)) best = rec;
+        });
+      }));
+      if (best) prs[id] = best;
+      else if (prs[id]) delete prs[id];
+      changed = true;
+    });
+    if (changed) Store.savePRs(prs);
+  }
+
   function checkAndUpdatePR(exerciseId, exerciseName, weight, reps, entered, ex) {
     const prs = Store.getPRs();
     const mode = prModeOf(ex);
@@ -2345,16 +2685,34 @@ Store.saveActiveWorkout({
     return {
       display: prSetDisplay(pr),
       e1rm: pr.e1rm || null,
-      detail: pr.e1rm ? `e1RM ${pr.e1rm}` : new Date(pr.date).toLocaleDateString()
+      detail: new Date(pr.date).toLocaleDateString()
     };
   }
 
-  function getPreviousExerciseData(exerciseId, dayId) {
+  // The last time this move was logged: this workout day's latest session if
+  // it's in there, otherwise the most recent session of it on any day (v0.32),
+  // so a move added from the list still opens on what you did last.
+  function lastExLog(exerciseId, dayId) {
     const logs = Store.getLogs();
-    if (!logs[dayId] || logs[dayId].length === 0) return null;
-    const lastLog = logs[dayId][logs[dayId].length - 1];
-    const exLog = lastLog.exercises.find(e => e.id === exerciseId);
-    if (!exLog || exLog.sets.length === 0) return null;
+    const pick = entry => {
+      const e = ((entry && entry.exercises) || []).find(x => x && x.id === exerciseId);
+      return e && Array.isArray(e.sets) && e.sets.length ? e : null;
+    };
+    const dayLogs = logs[dayId] || [];
+    const here = dayLogs.length ? pick(dayLogs[dayLogs.length - 1]) : null;
+    if (here) return here;
+    let best = null, bestT = -Infinity;
+    Object.keys(logs).forEach(d => [].concat(logs[d] || []).forEach(entry => {
+      const e = pick(entry);
+      const t = Date.parse((entry && (entry.completedAt || entry.date)) || '');
+      if (e && isFinite(t) && t > bestT) { best = e; bestT = t; }
+    }));
+    return best;
+  }
+
+  function getPreviousExerciseData(exerciseId, dayId) {
+    const exLog = lastExLog(exerciseId, dayId);
+    if (!exLog) return null;
     const lastSet = exLog.sets[exLog.sets.length - 1];
     const maxWeight = Math.max(...exLog.sets.map(set => set.weight));
     // On BW+ / BW- moves, weight is total load (bodyweight plus or minus the
@@ -2374,11 +2732,8 @@ Store.saveActiveWorkout({
 
   // ===== TIME-BASED EXERCISE HELPERS =====
   function getTimePreviousData(exerciseId, dayId) {
-    const logs = Store.getLogs();
-    if (!logs[dayId] || logs[dayId].length === 0) return null;
-    const lastLog = logs[dayId][logs[dayId].length - 1];
-    const exLog = lastLog.exercises.find(e => e.id === exerciseId);
-    if (!exLog || exLog.sets.length === 0) return null;
+    const exLog = lastExLog(exerciseId, dayId);
+    if (!exLog) return null;
     const bestTime = Math.max(...exLog.sets.map(s => parseInt(s.reps) || 0));
     return {
       display: bestTime + 's',
@@ -2418,7 +2773,7 @@ Store.saveActiveWorkout({
       const ex = (FORGE_DATA.workouts[wid].exercises || []).find(e => e.id === id);
       if (ex) return ex;
     }
-    return null;
+    return (FORGE_DATA.cardio || []).find(e => e.id === id) || null;
   }
 
   // One logged set, read the way it was shown when it was logged. On sets from
@@ -2971,7 +3326,7 @@ Store.saveActiveWorkout({
   // refuse to vibrate a page that isn't showing.
   function buzzCountdown(msLeft) {
     try {
-      if (!navigator.vibrate) return;
+      if (!navigator.vibrate || !restVibrateOn()) return;
       const marks = [3000, 2000, 1000, 0].map(k => msLeft - k).filter(a => a >= 0);
       const pattern = [0];
       let cursor = 0;
@@ -3062,7 +3417,6 @@ Store.saveActiveWorkout({
 
   function setBWMode(mode) {
     const day = activeDay();
-    const workout = FORGE_DATA.workouts[day.id];
     const ex = activeExercises()[state.currentExerciseIndex];
     ex.weightMode = mode;
     const s = Store.getSettings();
@@ -3316,7 +3670,7 @@ Store.saveActiveWorkout({
     const dR = cur.reps - (prev.reps || 0);
     const gain = dW > 0 ? '+' + dW + ' ' + unit : '+' + dR + ' rep' + (dR === 1 ? '' : 's');
     return { num: prSetDisplay(cur),
-      delta: '<b>' + gain + '</b> over ' + prSetDisplay(prev) + (cur.e1rm ? ' · e1RM ' + cur.e1rm : '') };
+      delta: '<b>' + gain + '</b> over ' + prSetDisplay(prev) };
   }
 
   let prTimer = null;
@@ -3492,7 +3846,6 @@ Store.saveActiveWorkout({
 
   function showInfo() {
     const day = activeDay();
-    const workout = FORGE_DATA.workouts[day.id];
     const ex = activeExercises()[state.currentExerciseIndex];
 
     const panel = document.getElementById('info-panel');
@@ -3518,9 +3871,7 @@ Store.saveActiveWorkout({
     const Figs = window.ForgeFigures;
     if (Figs) Figs.stopAll();
     const fig = Figs && Figs.has(ex.id) ? Figs.mount(slot, ex.id, { code: codeFor(day.id), name: ex.name }) : null;
-    if (!fig && ex.image) {
-      slot.outerHTML = `<img class="info-panel-image" src="${ex.image}" alt="${ex.name}" onerror="this.style.display='none'">`;
-    }
+    if (!fig && slot) slot.remove();   // no figure: the tip stands alone
 
     showPanel('info-panel');
   }
@@ -3610,16 +3961,11 @@ Store.saveActiveWorkout({
       let detail = '';
       log.exercises.forEach(ex => {
         if (ex.sets.length === 0) return;
-        const bestSet = ex.sets.reduce((best, s) => {
-          const e1 = FORGE_DATA.calculateE1RM(s.weight, s.reps || 0);
-          return e1 > best.e1rm ? { e1rm: e1, display: s.display } : best;
-        }, { e1rm: 0, display: '' });
 
         detail += `
           <div class="detail-exercise">
             <div class="detail-exercise-header">
               <span class="detail-exercise-name">${ex.name}</span>
-              ${bestSet.e1rm > 0 ? `<span class="detail-e1rm">e1RM ${bestSet.e1rm}</span>` : ''}
             </div>
             <div class="detail-sets">
               ${ex.sets.map((set, si) => `
@@ -3715,7 +4061,7 @@ Store.saveActiveWorkout({
       ${section('Weighted', weighted, pr => row(
         pr,
         prSetDisplay(pr),
-        `${new Date(pr.date).toLocaleDateString()}${pr.e1rm ? ` · e1RM ${pr.e1rm} ${state.weightUnit}` : ''}`
+        new Date(pr.date).toLocaleDateString()
       ))}
 
       ${section('Bodyweight', byReps, pr => row(
@@ -3731,10 +4077,9 @@ Store.saveActiveWorkout({
       ))}
 
       <div class="sheet-note">
-        The big number is the best set you actually did. e1RM is an estimate of
-        your one-rep max from that set, and it only appears at 12 reps or fewer
-        because the formula stops meaning anything above that. Tap any record
-        for its history.
+        Each record is the best set you actually did: heaviest first, then most
+        reps. Edit a set or delete a workout and the record is worked out again
+        from what's logged. Tap any record for its history.
       </div>
     `;
   }
@@ -3776,8 +4121,13 @@ Store.saveActiveWorkout({
               oninput="FORGE.setRestVolume(this.value)" onchange="FORGE.testRestAlert()" aria-describedby="settings-restvol-help">
             <button class="action-btn vol-test" onclick="FORGE.testRestAlert()" aria-label="Play the rest alert"><i class="ti ti-volume"></i> Test</button>
           </div>
+          <div class="settings-row">
+            <span class="settings-k">Vibrate when rest ends</span>
+            <button class="action-btn vol-test vib-toggle${restVibrateOn() ? ' on' : ''}" id="settings-vib" onclick="FORGE.toggleRestVibrate()"
+              aria-pressed="${restVibrateOn()}" aria-label="Vibrate when rest ends"><i class="ti ti-device-mobile-vibration"></i> <span id="settings-vib-val">${restVibrateOn() ? 'On' : 'Off'}</span></button>
+          </div>
           <div class="settings-help" id="settings-restvol-help">
-            Saves as you slide it. 0 turns the sound off; the phone still vibrates.
+            Both save as you change them. 0 turns the sound off. Vibration is its own switch, and only buzzes while the screen is on.
           </div>
         </div>
         <button class="start-btn" onclick="FORGE.saveSettings()">Save settings</button>
@@ -3788,7 +4138,7 @@ Store.saveActiveWorkout({
         ${renderBackupStatus()}
         <input type="file" id="import-file" accept=".json,.txt,application/json,text/plain" style="display:none;" onchange="FORGE.importData(this)">
         <button class="action-btn" onclick="document.getElementById('import-file').click()">
-          <i class="ti ti-upload"></i> Import data from JSON
+          <i class="ti ti-upload"></i> Restore from backup
         </button>
         <button class="action-btn warn" onclick="FORGE.clearToday()">
           <i class="ti ti-rotate-2"></i> Clear today's workout
@@ -3811,6 +4161,20 @@ Store.saveActiveWorkout({
     const lab = document.getElementById('settings-restvol-val');
     if (lab) lab.textContent = volLabel(v);
     if (restOut) restOut.gain.value = restGain(v);
+  }
+  // v0.32: the rest-end vibration has its own switch. Absent = on, so
+  // nobody's phone goes quiet just by updating.
+  function restVibrateOn() { return Store.getSettings().restVibrate !== false; }
+  function toggleRestVibrate() {
+    const settings = Store.getSettings();
+    const on = settings.restVibrate === false;
+    settings.restVibrate = on;
+    Store.saveSettings(settings);
+    try { if (navigator.vibrate) navigator.vibrate(on ? 120 : 0); } catch (e) {}
+    const btn = document.getElementById('settings-vib');
+    const val = document.getElementById('settings-vib-val');
+    if (btn) { btn.classList.toggle('on', on); btn.setAttribute('aria-pressed', String(on)); }
+    if (val) val.textContent = on ? 'On' : 'Off';
   }
   // The zero beeps at the current level, so the slider can be set by ear.
   function testRestAlert() {
@@ -3970,9 +4334,11 @@ Store.saveActiveWorkout({
           Store.saveSettings(data.settings);
           state.bodyWeight = data.settings.bodyWeight || 180;
           state.weightUnit = data.settings.weightUnit || 'lbs';
-          state.sheetsUrl = Sandbox.on ? '' : (data.settings.sheetsUrl || FORGE_DATA.sheetsWebhookUrl || '');
+          state.sheetsUrl = Sandbox.on ? '' : (FORGE_DATA.sheetsWebhookUrl || '');
         }
 
+        migrateSizeShift();   // a backup from before v0.33 carries the old size names
+        state.workoutSize = Store.getSettings().workoutSize || 'normal';
         migrateCompletedDays(); // imported backups may contain old poisoned entries
         applyBwModes();
         migratePRs();
@@ -3982,7 +4348,7 @@ Store.saveActiveWorkout({
         alert('Data imported successfully.');
         renderTab('home');
       } catch (err) {
-        alert('Could not read file. Make sure it is a valid FORGE backup JSON.');
+        alert('Could not read that file. Pick a FORGE backup (.txt or .json).');
       }
       input.value = '';
     };
@@ -3995,9 +4361,14 @@ Store.saveActiveWorkout({
     const todayEntries = completed.filter(c => c.date === today);
 
     // Active session with nothing saved yet: just kill the session
+    // Records set in a session that gets thrown away go with it.
+    const activeIds = () => (state.activeWorkoutLog ? state.activeWorkoutLog.exercises.map(e => e.id) : []);
+
     if (!todayEntries.length && state.workoutActive) {
       if (confirm('Cancel the current workout in progress?')) {
+        const ids = activeIds();
         resetWorkoutState();
+        rebuildRecords(ids);
         renderTab('home');
       }
       return;
@@ -4011,8 +4382,11 @@ Store.saveActiveWorkout({
     const names = todayEntries.map(c => labelFor(c)).join(', ');
     if (confirm(`Clear everything logged today (${names})? Cycle position recalculates on its own.`)) {
       const logs = Store.getLogs();
+      const touched = activeIds();
       todayEntries.forEach(c => {
         if (c.dayId && c.dayId !== 'rest' && logs[c.dayId]) {
+          logs[c.dayId].filter(log => log.completedAt && localDateOf(log.completedAt) === today)
+            .forEach(log => (log.exercises || []).forEach(e => touched.push(e.id)));
           // Compare LOCAL dates. completedAt is UTC, so an evening workout's
           // raw string starts with tomorrow's date and never matched.
           logs[c.dayId] = logs[c.dayId].filter(
@@ -4026,6 +4400,7 @@ Store.saveActiveWorkout({
 
       refreshCycle();          // no manual rollback; it recomputes
       resetWorkoutState();
+      rebuildRecords(touched);
       renderTab('home');
     }
   }
@@ -4034,6 +4409,7 @@ Store.saveActiveWorkout({
     if (confirm('This will delete ALL workout data, PRs, and settings. Are you sure?')) {
       if (confirm('Really? This cannot be undone.')) {
         Store.clearAll();   // in the sandbox, this wipes only the copy
+        Store.set('seenRelease', RELEASE.id);   // a fresh start has nothing "new" to read
         state.bodyWeight = 180;
         refreshCycle();
         resetWorkoutState();
@@ -4051,7 +4427,6 @@ Store.saveActiveWorkout({
     dismissPanel,
     logRestToday,
     openDaySheet,
-    closeDaySheet,
     openKeySheet,
     setWorkoutSize,
     openPickerSheet,
@@ -4092,6 +4467,11 @@ Store.saveActiveWorkout({
     saveSettings,
     setRestVolume,
     testRestAlert,
+    toggleRestVibrate,
+    openAddSheet,
+    filterAdd,
+    addExercise,
+    removeAdded,
     exportData,
     clearData,
     clearToday,

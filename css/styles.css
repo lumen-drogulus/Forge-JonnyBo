@@ -1,4 +1,14 @@
-@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700;800&display=swap');
+/* Fonts are stored with the app (v0.34) so they work with no signal. Latin set only. */
+@font-face { font-family: 'Barlow Condensed'; font-style: normal; font-weight: 500; font-display: swap; src: url('../fonts/barlow-condensed-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Barlow Condensed'; font-style: normal; font-weight: 600; font-display: swap; src: url('../fonts/barlow-condensed-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Barlow Condensed'; font-style: normal; font-weight: 700; font-display: swap; src: url('../fonts/barlow-condensed-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Barlow'; font-style: normal; font-weight: 400; font-display: swap; src: url('../fonts/barlow-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Barlow'; font-style: normal; font-weight: 500; font-display: swap; src: url('../fonts/barlow-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Barlow'; font-style: normal; font-weight: 600; font-display: swap; src: url('../fonts/barlow-latin-600-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('../fonts/jetbrains-mono-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('../fonts/jetbrains-mono-latin-500-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 700; font-display: swap; src: url('../fonts/jetbrains-mono-latin-700-normal.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 800; font-display: swap; src: url('../fonts/jetbrains-mono-latin-800-normal.woff2') format('woff2'); }
 
 /* ============================================================
    FORGE v0.16 · "Machined"
@@ -654,7 +664,6 @@ button { font: inherit; color: inherit; }
 .detail-exercise { padding: 6px 0 6px 10px; border-left: 1px solid var(--border); }
 .detail-exercise-header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
 .detail-exercise-name { font-size: 13px; color: #C9CDD2; }
-.detail-e1rm { font-family: var(--font-mono); font-size: 10px; color: var(--acc); }
 .detail-sets { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; }
 .detail-set { display: flex; gap: 4px; align-items: baseline; }
 .detail-set-num { font-family: var(--font-mono); font-size: 9px; color: var(--text-muted); }
@@ -696,7 +705,6 @@ button { font: inherit; color: inherit; }
   text-transform: uppercase;
   margin-bottom: 12px;
 }
-.info-panel-image { width: 100%; border-radius: var(--radius); margin-bottom: 12px; display: block; }
 .info-panel-tip { font-size: 15px; line-height: 1.55; color: #C9CDD2; margin-bottom: 14px; }
 /* Cable attachment row (v0.30): steel line art, no day colour (nothing is happening there) */
 .info-attach { display: flex; align-items: center; gap: 14px; padding: 10px 0; margin: -4px 0 14px; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
@@ -1644,3 +1652,70 @@ body.sandbox .header-date { display: none; }
 }
 .release-btn:focus-visible { outline: 2px solid var(--text-primary); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .release-overlay { animation: none; } .release-overlay.closing { transition: none; } }
+
+/* ===== v0.32: add an exercise, cardio, vibration switch ===== */
+.add-ex-btn {
+  width: 100%;
+  height: 48px;
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: none;
+  border: 1px dashed var(--border-light);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.add-ex-btn:active { background: var(--bg-elevated); }
+.add-ex-btn .ti { font-size: 16px; }
+.added-tag { color: var(--text-secondary); background: var(--bg-elevated); }
+.wo-remove {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+}
+.add-search {
+  width: 100%;
+  height: 44px;
+  margin: 2px 0 4px;
+  padding: 0 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  font-size: 16px;
+}
+.add-search:focus { border-color: var(--border-light); }
+.add-row .ti-plus { color: var(--text-muted); font-size: 16px; }
+.add-row.taken { cursor: default; }
+.add-row.taken .pick-name { color: var(--text-muted); }
+.add-row[hidden], .add-group[hidden] { display: none; }
+
+.cardio-tip { font-size: 13px; color: var(--text-secondary); }
+.cardio-last { display: flex; align-items: baseline; gap: 10px; padding: 8px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.cardio-last-v { font-family: var(--font-mono); font-size: 14px; color: var(--text-primary); }
+.cardio-block { gap: 14px; padding: 6px 0; }
+.cardio-row { display: grid; grid-template-columns: 1fr 132px 1fr; align-items: baseline; gap: 12px; }
+.cardio-row .load-label { text-align: right; }
+.cardio-input { width: 100%; }
+.cardio-unit { font-family: var(--font-mono); font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); }
+
+.vib-toggle { color: var(--text-muted); min-width: 92px; justify-content: center; }
+.vib-toggle.on { color: var(--text-primary); border-color: var(--border-light); }
